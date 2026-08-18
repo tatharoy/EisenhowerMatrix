@@ -1,0 +1,5 @@
+{
+  "useExternalSync": true,
+  "externalFolder": "C:\\Tatha\\code\\TasksAndSchedule",
+  "syncMethod": "git"
+}
