@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { SettingsIcon } from "../icons.jsx";
 import { playReminder } from "../sound.js";
+import { saveGithubConfig } from "../githubApi.js";
 
 export default function SettingsPanel({ config, onSave }) {
   const [open, setOpen] = useState(false);
@@ -53,79 +54,105 @@ export default function SettingsPanel({ config, onSave }) {
 
       {open && (
         <div className="settings-panel">
-          <div className="settings-title">Where should your data live?</div>
-
-          <label className="settings-checkbox-row">
-            <input
-              type="checkbox"
-              checked={useExternalSync}
-              onChange={(e) => setUseExternalSync(e.target.checked)}
-            />
-            Sync with an external folder
-          </label>
-
-          {useExternalSync && (
+          {config.source === "github" ? (
             <>
-              <input
-                type="text"
-                className="settings-folder-input"
-                placeholder="e.g. C:\Users\you\Google Drive\Tatha's Schedule"
-                value={externalFolder}
-                onChange={(e) => setExternalFolder(e.target.value)}
-              />
-
-              <div className="settings-method-row">
-                <label className="settings-radio-row">
-                  <input
-                    type="radio"
-                    name="syncMethod"
-                    checked={syncMethod === "folder"}
-                    onChange={() => setSyncMethod("folder")}
-                  />
-                  Synced folder (Google Drive, OneDrive, SharePoint)
-                </label>
-                <label className="settings-radio-row">
-                  <input
-                    type="radio"
-                    name="syncMethod"
-                    checked={syncMethod === "git"}
-                    onChange={() => setSyncMethod("git")}
-                  />
-                  Git repository (e.g. GitHub) — auto commit &amp; push
-                </label>
+              <div className="settings-title">GitHub Sync</div>
+              <div className="settings-note">
+                Tasks are syncing with{" "}
+                <strong>
+                  {config.effectiveDbFile?.replace("github:", "").replace("/tasks.json", "")}
+                </strong>
               </div>
+              <div className="settings-actions" style={{ marginBottom: 8 }}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    saveGithubConfig(null);
+                    window.location.reload();
+                  }}
+                >
+                  Re-configure token / repo
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="settings-title">Where should your data live?</div>
 
-              {syncMethod === "folder" && (
-                <div className="settings-note">
-                  This just needs to be a folder that a desktop sync client
-                  (Google Drive, OneDrive, SharePoint) is already watching —
-                  the app only writes plain files there.
-                </div>
-              )}
+              <label className="settings-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={useExternalSync}
+                  onChange={(e) => setUseExternalSync(e.target.checked)}
+                />
+                Sync with an external folder
+              </label>
 
-              {syncMethod === "git" && (
-                <div className="settings-note">
-                  This folder must already be a git repository with push
-                  access working with no prompts (SSH key or a credential
-                  helper) — the app only runs <code>git add</code>,{" "}
-                  <code>commit</code>, and <code>push</code> automatically, a
-                  few seconds after your last change. It never touches
-                  credentials or creates the repo for you.
-                  {config.externalFolder === externalFolder && (
-                    <div style={{ marginTop: 6 }}>
-                      {config.gitRepoDetected
-                        ? "✓ Looks like a git repository."
-                        : "⚠ This doesn't look like a git repository yet (no .git folder found)."}
+              {useExternalSync && (
+                <>
+                  <input
+                    type="text"
+                    className="settings-folder-input"
+                    placeholder="e.g. C:\Users\you\Google Drive\Tatha's Schedule"
+                    value={externalFolder}
+                    onChange={(e) => setExternalFolder(e.target.value)}
+                  />
+
+                  <div className="settings-method-row">
+                    <label className="settings-radio-row">
+                      <input
+                        type="radio"
+                        name="syncMethod"
+                        checked={syncMethod === "folder"}
+                        onChange={() => setSyncMethod("folder")}
+                      />
+                      Synced folder (Google Drive, OneDrive, SharePoint)
+                    </label>
+                    <label className="settings-radio-row">
+                      <input
+                        type="radio"
+                        name="syncMethod"
+                        checked={syncMethod === "git"}
+                        onChange={() => setSyncMethod("git")}
+                      />
+                      Git repository (e.g. GitHub) — auto commit &amp; push
+                    </label>
+                  </div>
+
+                  {syncMethod === "folder" && (
+                    <div className="settings-note">
+                      This just needs to be a folder that a desktop sync client
+                      (Google Drive, OneDrive, SharePoint) is already watching —
+                      the app only writes plain files there.
                     </div>
                   )}
-                </div>
-              )}
 
-              {syncMethod === "git" && config.lastGitSync && config.lastGitSync.at && (
-                <div className="settings-note">
-                  Last sync attempt: {config.lastGitSync.ok ? "✓" : "✗"}{" "}
-                  {config.lastGitSync.message}
-                </div>
+                  {syncMethod === "git" && (
+                    <div className="settings-note">
+                      This folder must already be a git repository with push
+                      access working with no prompts (SSH key or a credential
+                      helper) — the app only runs <code>git add</code>,{" "}
+                      <code>commit</code>, and <code>push</code> automatically, a
+                      few seconds after your last change. It never touches
+                      credentials or creates the repo for you.
+                      {config.externalFolder === externalFolder && (
+                        <div style={{ marginTop: 6 }}>
+                          {config.gitRepoDetected
+                            ? "✓ Looks like a git repository."
+                            : "⚠ This doesn't look like a git repository yet (no .git folder found)."}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {syncMethod === "git" && config.lastGitSync && config.lastGitSync.at && (
+                    <div className="settings-note">
+                      Last sync attempt: {config.lastGitSync.ok ? "✓" : "✗"}{" "}
+                      {config.lastGitSync.message}
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
@@ -148,36 +175,40 @@ export default function SettingsPanel({ config, onSave }) {
             </button>
           </div>
 
-          <div className="settings-current">
-            <div>Currently reading from:</div>
-            <div className="settings-path">{config.effectiveDbFile}</div>
-            <div className="settings-path">{config.effectiveMetadataFile}</div>
-          </div>
+          {config.source !== "github" && (
+            <>
+              <div className="settings-current">
+                <div>Currently reading from:</div>
+                <div className="settings-path">{config.effectiveDbFile}</div>
+                <div className="settings-path">{config.effectiveMetadataFile}</div>
+              </div>
 
-          {config.overriddenByEnv && (
-            <div className="settings-note">
-              DB_FILE / METADATA_FILE environment variables are set on this
-              machine and take priority over this setting.
-            </div>
+              {config.overriddenByEnv && (
+                <div className="settings-note">
+                  DB_FILE / METADATA_FILE environment variables are set on this
+                  machine and take priority over this setting.
+                </div>
+              )}
+
+              <div className="settings-actions">
+                <button type="button" onClick={save}>
+                  Save
+                </button>
+                {status === "saved" && (
+                  <span className="settings-status ok">
+                    Saved{savedRestartRequired ? " — restart the app to apply." : "."}
+                  </span>
+                )}
+                {status === "error" && (
+                  <span className="settings-status err">
+                    {useExternalSync && !externalFolder.trim()
+                      ? "Enter a folder path first."
+                      : "Failed to save."}
+                  </span>
+                )}
+              </div>
+            </>
           )}
-
-          <div className="settings-actions">
-            <button type="button" onClick={save}>
-              Save
-            </button>
-            {status === "saved" && (
-              <span className="settings-status ok">
-                Saved{savedRestartRequired ? " — restart the app to apply." : "."}
-              </span>
-            )}
-            {status === "error" && (
-              <span className="settings-status err">
-                {useExternalSync && !externalFolder.trim()
-                  ? "Enter a folder path first."
-                  : "Failed to save."}
-              </span>
-            )}
-          </div>
         </div>
       )}
     </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "./api.js";
+import { api, isCapacitorNative } from "./api.js";
+import { isGithubConfigured } from "./githubApi.js";
 import {
   effectiveQuadrantKey,
   flagsForQuadrant,
@@ -13,8 +14,12 @@ import Matrix from "./components/Matrix.jsx";
 import Completed from "./components/Completed.jsx";
 import TitleBar from "./components/TitleBar.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
+import GitHubSetup from "./components/GitHubSetup.jsx";
 
 export default function App() {
+  const [needsSetup, setNeedsSetup] = useState(
+    () => isCapacitorNative() && !isGithubConfigured()
+  );
   const [tasks, setTasks] = useState([]);
   const [title, setTitle] = useState("Tatha's Schedule");
   const [tags, setTags] = useState([]);
@@ -43,7 +48,11 @@ export default function App() {
         setLoading(false);
       })
       .catch(() => {
-        setError("Could not reach the backend. Is it running on port 4000?");
+        setError(
+          isCapacitorNative()
+            ? "Could not reach GitHub. Check your connection and token in Settings."
+            : "Could not reach the backend. Is it running on port 4000?"
+        );
         setLoading(false);
       });
   }, []);
@@ -267,6 +276,10 @@ export default function App() {
     delegate: active.filter((t) => effectiveQuadrantKey(t, now) === "delegate"),
     eliminate: active.filter((t) => effectiveQuadrantKey(t, now) === "eliminate"),
   };
+
+  if (needsSetup) {
+    return <GitHubSetup onComplete={() => setNeedsSetup(false)} />;
+  }
 
   return (
     <div className="app">

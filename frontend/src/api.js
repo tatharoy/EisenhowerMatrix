@@ -1,3 +1,14 @@
+import { githubApi } from "./githubApi.js";
+
+export function isCapacitorNative() {
+  return (
+    typeof window !== "undefined" &&
+    !!window.Capacitor?.isNativePlatform &&
+    window.Capacitor.isNativePlatform()
+  );
+}
+
+// Original Express backend API (unchanged — used when running in the browser)
 const TASKS = "/api/tasks";
 const METADATA = "/api/metadata";
 const CONFIG = "/api/config";
@@ -11,7 +22,7 @@ async function toJson(res) {
   return res.json();
 }
 
-export const api = {
+const webApi = {
   list: () => fetch(TASKS).then(toJson),
 
   create: ({ title, notes, tagId, dueDate, recurrence, isFollowUp }) =>
@@ -69,3 +80,15 @@ export const api = {
       body: JSON.stringify(patch),
     }).then(toJson),
 };
+
+// Transparent proxy: routes every call to githubApi on native iOS,
+// or to the Express backend when running in the browser.
+export const api = new Proxy(
+  {},
+  {
+    get(_, method) {
+      const target = isCapacitorNative() ? githubApi : webApi;
+      return target[method]?.bind(target);
+    },
+  }
+);

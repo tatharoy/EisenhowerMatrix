@@ -6,13 +6,18 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:ios": "vite build",
+    "cap:sync": "npx cap sync"
   },
   "dependencies": {
+    "@capacitor/core": "^6.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.1.0",
+    "@capacitor/ios": "^6.1.0",
     "@vitejs/plugin-react": "^4.3.1",
     "vite": "^5.4.0"
   }
