@@ -1,7 +1,7 @@
 import Quadrant from "./Quadrant.jsx";
 import { QUADRANTS } from "../quadrants.js";
 
-export default function Matrix({ tasksByQuadrant, dragOverKey, onDragOver, onDragLeave, onDrop, onDragStart, onToggle, onDelete, onToggleFollowUp, onEdit, now }) {
+export default function Matrix({ tasksByQuadrant, dragOverKey, onDragOver, onDragLeave, onDrop, onDragStart, onToggle, onToggleTimeSlot, onDelete, onToggleFollowUp, onAddFollowUpComment, onEdit, tags, onAddTag, now }) {
   const [doQ, scheduleQ, delegateQ, eliminateQ] = QUADRANTS;
 
   return (
@@ -25,9 +25,13 @@ export default function Matrix({ tasksByQuadrant, dragOverKey, onDragOver, onDra
           onDrop={() => onDrop(doQ.key)}
           onDragStart={onDragStart}
           onToggle={onToggle}
+          onToggleTimeSlot={onToggleTimeSlot}
           onDelete={onDelete}
           onToggleFollowUp={onToggleFollowUp}
+          onAddFollowUpComment={onAddFollowUpComment}
           onEdit={onEdit}
+          tags={tags}
+          onAddTag={onAddTag}
           now={now}
         />
         <Quadrant
@@ -39,9 +43,13 @@ export default function Matrix({ tasksByQuadrant, dragOverKey, onDragOver, onDra
           onDrop={() => onDrop(scheduleQ.key)}
           onDragStart={onDragStart}
           onToggle={onToggle}
+          onToggleTimeSlot={onToggleTimeSlot}
           onDelete={onDelete}
           onToggleFollowUp={onToggleFollowUp}
+          onAddFollowUpComment={onAddFollowUpComment}
           onEdit={onEdit}
+          tags={tags}
+          onAddTag={onAddTag}
           now={now}
         />
 
@@ -57,9 +65,13 @@ export default function Matrix({ tasksByQuadrant, dragOverKey, onDragOver, onDra
           onDrop={() => onDrop(delegateQ.key)}
           onDragStart={onDragStart}
           onToggle={onToggle}
+          onToggleTimeSlot={onToggleTimeSlot}
           onDelete={onDelete}
           onToggleFollowUp={onToggleFollowUp}
+          onAddFollowUpComment={onAddFollowUpComment}
           onEdit={onEdit}
+          tags={tags}
+          onAddTag={onAddTag}
           now={now}
         />
         <Quadrant
@@ -71,9 +83,13 @@ export default function Matrix({ tasksByQuadrant, dragOverKey, onDragOver, onDra
           onDrop={() => onDrop(eliminateQ.key)}
           onDragStart={onDragStart}
           onToggle={onToggle}
+          onToggleTimeSlot={onToggleTimeSlot}
           onDelete={onDelete}
           onToggleFollowUp={onToggleFollowUp}
+          onAddFollowUpComment={onAddFollowUpComment}
           onEdit={onEdit}
+          tags={tags}
+          onAddTag={onAddTag}
           now={now}
         />
       </div>

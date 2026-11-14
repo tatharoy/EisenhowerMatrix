@@ -7,6 +7,7 @@ const { FileRepository } = require("./repository");
 const { MetadataStore } = require("./metadataStore");
 const { ConfigStore } = require("./configStore");
 const { createGitSyncScheduler, isGitRepo } = require("./gitSync");
+const { runArchive } = require("./archiver");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -110,6 +111,25 @@ function maybeSyncGit() {
   gitScheduler.schedule();
 }
 
+// Archiving: completed one-off tasks older than configStore's
+// archiveAfterDays move out of tasks.json into archive_tasks.json, right
+// next to it -- so it follows the same local/external-sync/git location
+// tasks.json already resolves to, with no separate setting of its own.
+// Config-file-only (no Settings UI, no API) -- edit config.json directly to
+// change the threshold or set it to 0 to disable.
+const ARCHIVE_FILE = path.join(path.dirname(DB_FILE), "archive_tasks.json");
+
+function runArchiveCheck() {
+  const cfg = configStore.get();
+  const archived = runArchive(DB_FILE, ARCHIVE_FILE, cfg.archiveAfterDays);
+  if (archived > 0) {
+    console.log(`Archived ${archived} completed task(s) older than ${cfg.archiveAfterDays} days.`);
+    maybeSyncGit();
+  }
+}
+runArchiveCheck();
+setInterval(runArchiveCheck, 24 * 60 * 60 * 1000);
+
 app.use(cors());
 app.use(express.json());
 
@@ -126,18 +146,52 @@ function validDateStr(v) {
   return v === null || (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v));
 }
 
+function validDaysOfWeek(arr) {
+  return (
+    Array.isArray(arr) &&
+    arr.length > 0 &&
+    arr.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+  );
+}
+
+function validTimeStr(v) {
+  return typeof v === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(v);
+}
+
+function validTimesArray(arr) {
+  return Array.isArray(arr) && arr.length > 0 && arr.every(validTimeStr);
+}
+
 function validRecurrence(v) {
   if (v === null) return true;
   if (typeof v !== "object" || Array.isArray(v)) return false;
-  const { frequency, dayOfWeek, dayOfMonth } = v;
-  if (!["daily", "weekly", "monthly"].includes(frequency)) return false;
+  const { frequency, dayOfWeek, daysOfWeek, dayOfMonth, anchorDate, times } = v;
+  if (!["daily", "weekly", "biweekly", "monthly"].includes(frequency)) return false;
   if (frequency === "weekly") {
+    // Accept either the new array form, or the legacy single-day form (kept
+    // valid so old clients / stored data don't suddenly start failing).
+    if (daysOfWeek !== undefined) return validDaysOfWeek(daysOfWeek);
     return Number.isInteger(dayOfWeek) && dayOfWeek >= 0 && dayOfWeek <= 6;
+  }
+  if (frequency === "biweekly") {
+    return validDaysOfWeek(daysOfWeek) && validDateStr(anchorDate) && anchorDate !== null;
   }
   if (frequency === "monthly") {
     return Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= 31;
   }
-  return true; // daily needs no extra fields
+  // daily: "times" is optional -- absent/null means the existing once-a-day
+  // behavior; a non-empty array of "HH:MM" strings means multiple-times-a-day
+  if (frequency === "daily" && times !== undefined && times !== null) {
+    return validTimesArray(times);
+  }
+  return true;
+}
+
+function validCompletedSlots(v) {
+  if (v === null) return true;
+  if (typeof v !== "object" || Array.isArray(v)) return false;
+  if (!validDateStr(v.date) || v.date === null) return false;
+  return Array.isArray(v.times) && v.times.every(validTimeStr);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +246,7 @@ app.patch("/api/tasks/:id", (req, res) => {
     dueDate,
     recurrence,
     lastCompletedDate,
+    completedSlots,
     isFollowUp,
     completionComment,
   } = req.body || {};
@@ -213,6 +268,9 @@ app.patch("/api/tasks/:id", (req, res) => {
   }
   if (lastCompletedDate !== undefined && !validDateStr(lastCompletedDate)) {
     return res.status(400).json({ error: "lastCompletedDate must be null or YYYY-MM-DD" });
+  }
+  if (completedSlots !== undefined && !validCompletedSlots(completedSlots)) {
+    return res.status(400).json({ error: "invalid completedSlots" });
   }
   if (isFollowUp !== undefined && typeof isFollowUp !== "boolean") {
     return res.status(400).json({ error: "isFollowUp must be a boolean" });
@@ -240,6 +298,7 @@ app.patch("/api/tasks/:id", (req, res) => {
     dueDate,
     recurrence,
     lastCompletedDate,
+    completedSlots,
     isFollowUp,
     completionComment,
   });
@@ -252,6 +311,21 @@ app.delete("/api/tasks/:id", (req, res) => {
   const ok = repo.remove(req.params.id);
   if (!ok) return res.status(404).json({ error: "not found" });
   res.status(204).end();
+  maybeSyncGit();
+});
+
+// Appends one dated follow-up entry -- independent of completion status.
+// Unlike the completion comment used to be, this is NOT skippable: an empty
+// comment wouldn't mean anything here, since the whole point of this
+// endpoint is to log something.
+app.post("/api/tasks/:id/followup-comments", (req, res) => {
+  const { comment } = req.body || {};
+  if (!comment || !comment.trim()) {
+    return res.status(400).json({ error: "comment is required" });
+  }
+  const updated = repo.appendFollowUpComment(req.params.id, comment.trim());
+  if (!updated) return res.status(404).json({ error: "not found" });
+  res.status(201).json(updated);
   maybeSyncGit();
 });
 
@@ -308,7 +382,13 @@ app.get("/api/config", (req, res) => {
 });
 
 app.patch("/api/config", (req, res) => {
-  const { useExternalSync, externalFolder, syncMethod } = req.body || {};
+  const {
+    useExternalSync,
+    externalFolder,
+    syncMethod,
+    reminderSound,
+    reminderIntervalMinutes,
+  } = req.body || {};
   if (useExternalSync !== undefined && typeof useExternalSync !== "boolean") {
     return res.status(400).json({ error: "useExternalSync must be a boolean" });
   }
@@ -318,13 +398,40 @@ app.patch("/api/config", (req, res) => {
   if (syncMethod !== undefined && !["folder", "git"].includes(syncMethod)) {
     return res.status(400).json({ error: 'syncMethod must be "folder" or "git"' });
   }
+  if (reminderSound !== undefined && !["none", "bell", "alert"].includes(reminderSound)) {
+    return res.status(400).json({ error: 'reminderSound must be "none", "bell", or "alert"' });
+  }
+  if (
+    reminderIntervalMinutes !== undefined &&
+    (!Number.isInteger(reminderIntervalMinutes) || reminderIntervalMinutes < 1)
+  ) {
+    return res.status(400).json({ error: "reminderIntervalMinutes must be a positive integer" });
+  }
   const next = { ...configStore.get(), ...req.body };
   if (next.useExternalSync && (!next.externalFolder || !next.externalFolder.trim())) {
     return res
       .status(400)
       .json({ error: "externalFolder is required when useExternalSync is true" });
   }
-  const updated = configStore.update({ useExternalSync, externalFolder, syncMethod });
+  const before = configStore.get();
+  const updated = configStore.update({
+    useExternalSync,
+    externalFolder,
+    syncMethod,
+    reminderSound,
+    reminderIntervalMinutes,
+  });
+  // Only the storage-location fields actually need a restart to take effect
+  // (DB_FILE/METADATA_FILE are resolved once at startup) -- the reminder
+  // sound is read live on every /api/config fetch, no restart needed.
+  // Compare actual before/after values rather than just whether the field
+  // was present in the request -- the Settings panel always sends its full
+  // form state together, so presence alone would wrongly flag every save
+  // (even a sound-only change) as needing a restart.
+  const storageFieldsChanged =
+    before.useExternalSync !== updated.useExternalSync ||
+    before.externalFolder !== updated.externalFolder ||
+    before.syncMethod !== updated.syncMethod;
   res.json({
     ...updated,
     effectiveDbFile: DB_FILE,
@@ -332,7 +439,7 @@ app.patch("/api/config", (req, res) => {
     overriddenByEnv: !!(process.env.DB_FILE || process.env.METADATA_FILE),
     gitRepoDetected: updated.externalFolder ? isGitRepo(updated.externalFolder) : false,
     lastGitSync: gitScheduler.getLastResult(),
-    restartRequired: true,
+    restartRequired: storageFieldsChanged,
   });
 });
 

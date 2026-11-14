@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
 import {
   effectiveQuadrantKey,
   flagsForQuadrant,
   toDateStr,
+  dueStatus,
 } from "./quadrants.js";
+import { playReminder } from "./sound.js";
 import NewTaskForm from "./components/NewTaskForm.jsx";
 import Inbox from "./components/Inbox.jsx";
 import Matrix from "./components/Matrix.jsx";
@@ -27,6 +29,8 @@ export default function App() {
     effectiveDbFile: "",
     effectiveMetadataFile: "",
     overriddenByEnv: false,
+    reminderSound: "none",
+    reminderIntervalMinutes: 30,
   });
 
   useEffect(() => {
@@ -52,6 +56,51 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Reminder sound: plays every reminderIntervalMinutes while at least one
+  // task is currently due today or overdue (dueStatus already accounts for
+  // recurring tasks' per-cycle "done for now" state, so this naturally
+  // covers both one-off and recurring tasks the same way the UI's own
+  // escalation-into-Do logic does). Gated by lastAlertAtRef so it doesn't
+  // fire on every 60s "now" tick -- only once the interval has elapsed.
+  const lastAlertAtRef = useRef(0);
+  useEffect(() => {
+    if (!config.reminderSound || config.reminderSound === "none") return;
+    const anyDue = tasks.some(
+      (t) => (t.recurrence || !t.completed) && dueStatus(t, now) !== null
+    );
+    if (!anyDue) return;
+    const intervalMs = (config.reminderIntervalMinutes || 30) * 60 * 1000;
+    if (Date.now() - lastAlertAtRef.current >= intervalMs) {
+      playReminder(config.reminderSound);
+      lastAlertAtRef.current = Date.now();
+    }
+  }, [now, tasks, config.reminderSound, config.reminderIntervalMinutes]);
+
+  // Specific-time alerts: any daily task with recurrence.times fires once
+  // per listed time per day, the moment the clock hits that minute --
+  // separate from the interval-based nag above, since these need to fire at
+  // an exact moment rather than repeat while something's generically "due".
+  // "Already alerted" is tracked in memory only (not persisted) -- fine
+  // since this only matters while the tab is open anyway.
+  const alertedSlotsRef = useRef(new Set());
+  useEffect(() => {
+    if (!config.reminderSound || config.reminderSound === "none") return;
+    const nowStr = toDateStr(now);
+    const nowHM = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    tasks.forEach((task) => {
+      const times = task.recurrence?.times;
+      if (!times || times.length === 0) return;
+      times.forEach((t) => {
+        if (t !== nowHM) return;
+        const key = `${task.id}|${nowStr}|${t}`;
+        if (alertedSlotsRef.current.has(key)) return;
+        alertedSlotsRef.current.add(key);
+        const alreadyDone = task.completedSlots?.date === nowStr && task.completedSlots.times.includes(t);
+        if (!alreadyDone) playReminder(config.reminderSound);
+      });
+    });
+  }, [now, tasks, config.reminderSound]);
+
   async function addTask({ title, notes, tagId, dueDate, recurrence, isFollowUp }) {
     try {
       const created = await api.create({ title, notes, tagId, dueDate, recurrence, isFollowUp });
@@ -74,20 +123,13 @@ export default function App() {
   // Recurring tasks track completion per-cycle (lastCompletedDate) instead
   // of the permanent completed flag, so they never leave the matrix for
   // good -- they just reset once the date no longer matches today.
-  //
-  // comment is only meaningful when *completing* (not un-completing) a
-  // follow-up task -- it's optional (skippable) but strongly encouraged by
-  // the UI, via the inline CompletionPrompt in TaskCard.
-  async function toggleComplete(task, comment = null) {
+  async function toggleComplete(task) {
     if (task.recurrence) {
       const todayStr = toDateStr(now);
-      const isDoneToday = task.lastCompletedDate === todayStr;
-      const lastCompletedDate = isDoneToday ? null : todayStr;
-      const patch = { lastCompletedDate };
-      if (!isDoneToday) patch.completionComment = comment;
-      setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, ...patch } : t)));
+      const lastCompletedDate = task.lastCompletedDate === todayStr ? null : todayStr;
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, lastCompletedDate } : t)));
       try {
-        await api.update(task.id, patch);
+        await api.update(task.id, { lastCompletedDate });
       } catch {
         setError("Failed to update task.");
       }
@@ -96,14 +138,11 @@ export default function App() {
 
     const completed = !task.completed;
     const completedAt = completed ? new Date().toISOString() : null;
-    const patch = { completed, completedAt };
-    if (completed) patch.completionComment = comment;
-    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, ...patch } : t)));
+    setTasks((ts) =>
+      ts.map((t) => (t.id === task.id ? { ...t, completed, completedAt } : t))
+    );
     try {
-      await api.update(task.id, {
-        completed,
-        completionComment: completed ? comment : undefined,
-      });
+      await api.update(task.id, { completed });
     } catch {
       setError("Failed to update task.");
     }
@@ -119,12 +158,45 @@ export default function App() {
     }
   }
 
-  // Only ever called for tasks TaskCard considers editable (not completed,
-  // not recurring) -- enforced client-side there, not by the backend.
-  async function editTask(task, title, notes) {
-    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, title, notes } : t)));
+  // Toggles one specific time slot for a multiple-times-a-day task.
+  // completedSlots resets naturally once the date no longer matches today --
+  // same "derive, don't force-migrate" pattern as lastCompletedDate.
+  async function toggleTimeSlot(task, time) {
+    const todayStr = toDateStr(now);
+    const current = task.completedSlots?.date === todayStr ? task.completedSlots.times : [];
+    const times = current.includes(time) ? current.filter((t) => t !== time) : [...current, time];
+    const completedSlots = { date: todayStr, times };
+    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, completedSlots } : t)));
     try {
-      await api.update(task.id, { title, notes });
+      await api.update(task.id, { completedSlots });
+    } catch {
+      setError("Failed to update task.");
+    }
+  }
+
+  // Logs a dated entry -- independent of completion, available any time
+  // while the task is still active. The server appends atomically and
+  // returns the updated task, so we sync local state from its response
+  // rather than guessing the new array shape ourselves.
+  async function addFollowUpComment(task, comment) {
+    try {
+      const updated = await api.addFollowUpComment(task.id, comment);
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? updated : t)));
+    } catch {
+      setError("Failed to add follow-up update.");
+    }
+  }
+
+  // Only ever called for tasks TaskCard considers editable (not completed) --
+  // enforced client-side there, not by the backend. Covers title, notes,
+  // tag, due date, and recurrence all together, since due date/recurrence
+  // are mutually exclusive and need to change as a pair.
+  async function editTask(task, title, notes, tagId, dueDate, recurrence) {
+    setTasks((ts) =>
+      ts.map((t) => (t.id === task.id ? { ...t, title, notes, tagId, dueDate, recurrence } : t))
+    );
+    try {
+      await api.update(task.id, { title, notes, tagId, dueDate, recurrence });
     } catch {
       setError("Failed to update task.");
     }
@@ -165,10 +237,10 @@ export default function App() {
     try {
       const updated = await api.updateConfig(patch);
       setConfig(updated);
-      return true;
+      return updated;
     } catch {
       setError("Failed to save storage settings.");
-      return false;
+      return null;
     }
   }
 
@@ -214,28 +286,36 @@ export default function App() {
       <Inbox
         tasks={inbox}
         now={now}
+        tags={tags}
+        onAddTag={addTag}
         dragOver={dragOverKey === "inbox"}
         onDragOver={() => setDragOverKey("inbox")}
         onDragLeave={() => setDragOverKey(null)}
         onDrop={() => handleDrop("inbox")}
         onDragStart={setDragId}
         onToggle={toggleComplete}
+        onToggleTimeSlot={toggleTimeSlot}
         onDelete={deleteTask}
         onToggleFollowUp={toggleFollowUp}
+        onAddFollowUpComment={addFollowUpComment}
         onEdit={editTask}
       />
 
       <Matrix
         tasksByQuadrant={tasksByQuadrant}
         now={now}
+        tags={tags}
+        onAddTag={addTag}
         dragOverKey={dragOverKey}
         onDragOver={setDragOverKey}
         onDragLeave={() => setDragOverKey(null)}
         onDrop={handleDrop}
         onDragStart={setDragId}
         onToggle={toggleComplete}
+        onToggleTimeSlot={toggleTimeSlot}
         onDelete={deleteTask}
         onToggleFollowUp={toggleFollowUp}
+        onAddFollowUpComment={addFollowUpComment}
         onEdit={editTask}
       />
 

@@ -1,5 +1,8 @@
 {
   "useExternalSync": true,
   "externalFolder": "C:\\Tatha\\code\\TasksAndSchedule",
-  "syncMethod": "git"
+  "syncMethod": "git",
+  "archiveAfterDays": 90,
+  "reminderSound": "bell",
+  "reminderIntervalMinutes": 30
 }

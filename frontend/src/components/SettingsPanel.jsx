@@ -1,19 +1,23 @@
 import { useEffect, useState } from "react";
 import { SettingsIcon } from "../icons.jsx";
+import { playReminder } from "../sound.js";
 
 export default function SettingsPanel({ config, onSave }) {
   const [open, setOpen] = useState(false);
   const [useExternalSync, setUseExternalSync] = useState(config.useExternalSync);
   const [externalFolder, setExternalFolder] = useState(config.externalFolder || "");
   const [syncMethod, setSyncMethod] = useState(config.syncMethod || "folder");
+  const [reminderSound, setReminderSound] = useState(config.reminderSound || "none");
   const [status, setStatus] = useState(null); // null | "saving" | "saved" | "error"
+  const [savedRestartRequired, setSavedRestartRequired] = useState(false);
 
   // Keep the form in sync if config is reloaded from the server elsewhere.
   useEffect(() => {
     setUseExternalSync(config.useExternalSync);
     setExternalFolder(config.externalFolder || "");
     setSyncMethod(config.syncMethod || "folder");
-  }, [config.useExternalSync, config.externalFolder, config.syncMethod]);
+    setReminderSound(config.reminderSound || "none");
+  }, [config.useExternalSync, config.externalFolder, config.syncMethod, config.reminderSound]);
 
   async function save() {
     if (useExternalSync && !externalFolder.trim()) {
@@ -21,12 +25,18 @@ export default function SettingsPanel({ config, onSave }) {
       return;
     }
     setStatus("saving");
-    const ok = await onSave({
+    const result = await onSave({
       useExternalSync,
       externalFolder: externalFolder.trim() || null,
       syncMethod,
+      reminderSound,
     });
-    setStatus(ok ? "saved" : "error");
+    if (result) {
+      setSavedRestartRequired(!!result.restartRequired);
+      setStatus("saved");
+    } else {
+      setStatus("error");
+    }
   }
 
   return (
@@ -120,6 +130,24 @@ export default function SettingsPanel({ config, onSave }) {
             </>
           )}
 
+          <div className="settings-title" style={{ marginTop: 14 }}>
+            Reminder sound
+          </div>
+          <div className="settings-note">
+            Plays every {config.reminderIntervalMinutes || 30} min while any task is due
+            today or overdue.
+          </div>
+          <div className="settings-sound-row">
+            <select value={reminderSound} onChange={(e) => setReminderSound(e.target.value)}>
+              <option value="none">Off</option>
+              <option value="bell">Bell</option>
+              <option value="alert">Urgent alert</option>
+            </select>
+            <button type="button" className="ghost" onClick={() => playReminder(reminderSound)}>
+              Test
+            </button>
+          </div>
+
           <div className="settings-current">
             <div>Currently reading from:</div>
             <div className="settings-path">{config.effectiveDbFile}</div>
@@ -138,7 +166,9 @@ export default function SettingsPanel({ config, onSave }) {
               Save
             </button>
             {status === "saved" && (
-              <span className="settings-status ok">Saved — restart the app to apply.</span>
+              <span className="settings-status ok">
+                Saved{savedRestartRequired ? " — restart the app to apply." : "."}
+              </span>
             )}
             {status === "error" && (
               <span className="settings-status err">

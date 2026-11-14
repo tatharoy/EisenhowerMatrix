@@ -129,10 +129,30 @@ npm run dist:mac    # -> electron/dist/*.dmg (must be run ON a Mac -- see below)
 ### Windows
 
 Built and verified here -- `npm run dist:win` produces a real NSIS
-installer (`Tatha's Schedule Setup 1.0.0.exe`). It's **unsigned**, so
+installer (`Tatha's Schedule Setup 1.1.0.exe`). It's **unsigned**, so
 Windows SmartScreen will show an "unknown publisher" warning on first run
 -- click "More info" -> "Run anyway". Signing needs a paid code-signing
 certificate; not set up here since this is for personal use.
+
+### Voice input in the desktop app
+
+Electron explicitly grants microphone access now (`main.js` sets a
+permission handler for it) -- without that, the mic button would silently
+fail to even prompt, regardless of anything in the page's own code.
+
+That said, there's a second, deeper issue this fix can't guarantee away:
+the Web Speech API's actual speech-to-text recognition runs through a
+Google backend that official Chrome/Edge builds reach using signed,
+proprietary API keys -- Electron's bundled Chromium doesn't include those
+keys. This is a documented Electron limitation, not something fixable
+from application code. **If voice input still doesn't work in the desktop
+app after this fix, that's very likely why**, and the real fix at that
+point is swapping the browser's built-in speech recognition for a cloud
+speech-to-text service (e.g. Azure Speech) called from the backend instead
+-- a bigger, separate change from anything here. The standalone
+`start.bat`/`start.sh` version (running in your actual Chrome/Edge, not
+Electron) doesn't have this problem at all, since it's using a real
+browser's speech backend the whole time.
 
 If you ever build this yourself on Linux (rather than Windows) like I did,
 electron-builder needs Wine to embed the icon/version info into the `.exe`:
@@ -210,6 +230,7 @@ eisenhower/
     metadataStore.js     MetadataStore for metadata.json (title + tags)
     configStore.js        ConfigStore for config.json (external sync flag)
     gitSync.js              Debounced git add/commit/push for the "git" sync method
+    archiver.js               Moves old completed tasks into archive_tasks.json
     data/                 tasks.json, metadata.json, .server.pid
   frontend/
     dist/               Built static app (created by `npm run build`)
@@ -219,10 +240,12 @@ eisenhower/
       icons.jsx          Inline SVG icons (mic, grip, x, pencil, stop, flag, repeat, settings)
       quadrants.js        Derives quadrant from (urgent, important) booleans
       useSpeech.js        Web Speech API hook
+      sound.js            Synthesized Bell/Urgent alert tones (Web Audio API)
       components/
         NewTaskForm.jsx
         TagPicker.jsx      Select a tag or add a new color-coded one
         TimingPicker.jsx   Set a due date or a repeat schedule (mutually exclusive)
+        FollowUpCommentForm.jsx  Inline form to log a dated follow-up entry
         TitleBar.jsx       Click-to-edit app title
         SettingsPanel.jsx  Toggle/configure the external sync folder
         MicButton.jsx
@@ -243,16 +266,26 @@ Task {
   id, title, notes,
   tagId:             string | null,   // references a tag id in metadata.json
   dueDate:           string | null,   // "YYYY-MM-DD", one-off deadline
-  recurrence:        object | null,   // { frequency: "daily"|"weekly"|"monthly", dayOfWeek?, dayOfMonth? }
+  recurrence:        object | null,   // { frequency: "daily"|"weekly"|"biweekly"|"monthly",
+                                       //   daysOfWeek?: number[], anchorDate?, dayOfMonth?,
+                                       //   times?: string[] -- "HH:MM"[], daily only, 2+ means
+                                       //   "multiple times a day" (see below) }
   lastCompletedDate: string | null,   // "YYYY-MM-DD" -- last cycle a recurring task was checked off
-  isFollowUp:        boolean,         // editable any time, unlike tags/dueDate/recurrence
-  completionComment: string | null,   // set (optionally) when completing a follow-up task
+  completedSlots:    object | null,   // { date: "YYYY-MM-DD", times: string[] } -- which of
+                                       //   today's specific times are done (multi-time tasks only)
+  isFollowUp:        boolean,         // editable any time, like everything else pre-completion
+  followUpComments:  [{ comment, at }],  // dated log, appended via a dedicated endpoint
+  completionComment: string | null,   // legacy field from before followUpComments existed
   urgent:    boolean | null,   // null = not yet placed (sits in Inbox)
   important: boolean | null,   // null = not yet placed (sits in Inbox)
   completed: boolean,          // only meaningful for non-recurring tasks
   createdAt, completedAt
 }
 ```
+
+Tasks older than 90 days (completed one-off tasks only) move out to
+`archive_tasks.json` automatically -- see "Archiving old completed tasks"
+below.
 
 `dueDate` and `recurrence` are mutually exclusive -- a task has at most one
 of the two.
@@ -351,50 +384,53 @@ git credentials or repository setup:
   npm start
   ```
 
-## Editing a task's title and notes
+## Editing a task
 
-Any task that's still "live" gets a small pencil icon on its card, next to
-the follow-up flag and delete buttons. Clicking it turns the title and
-notes into editable fields inline, with Save/Cancel -- an empty title is
-rejected with an inline error rather than silently saved.
+Any task that's still incomplete gets a small pencil icon on its card.
+Clicking it turns the card into an inline form covering **title, notes,
+tag, and due date/repeat schedule together** -- Save/Cancel, with an empty
+title rejected via an inline error rather than silently saved.
 
-"Live" means:
-- **Not completed** -- once a one-off task is checked off it becomes a
-  historical record (consistent with why a follow-up's completion comment
-  can't be changed afterward either), so the pencil disappears the moment
-  it lands in Completed.
-- **Not recurring** -- a recurring task's title/notes are fixed at
-  creation, same as its repeat schedule; there's no pencil on these at all,
-  checked-off-today or not.
+"Editable" now just means **not completed** -- recurring tasks are
+included, since their repeat schedule is editable too (pick a different
+day, switch weekly to biweekly, whatever). Once a one-off task is checked
+off it becomes a historical record and the pencil disappears; recurring
+tasks keep their pencil regardless of whether today's cycle is checked off,
+since being "done for today" isn't the same as being permanently done.
 
-This check happens entirely in the frontend (`TaskCard.jsx`) -- the backend
-already accepted a `title`/`notes` patch on any task regardless of its
-state, so there's no server-side enforcement blocking it directly through
-the API. Fine for a personal single-user tool; flag it if you ever want
-that tightened up.
+This is enforced entirely in the frontend (`TaskCard.jsx`) -- the backend
+accepts a patch to any of these fields on any task regardless of state, so
+there's no server-side blocking through the API directly. Fine for a
+personal single-user tool; flag it if you want that tightened up.
 
 ## Follow-up tasks
 
 Check "Follow-up" in the new-task form (or toggle the flag icon on any
-existing card, any time -- unlike tags, due dates, and recurrence, this one
-is editable after creation) to mark a task as needing a resolution note.
-It's a flag, not a tag or a separate section -- a follow-up task still gets
-prioritized and dragged into a quadrant like any other task, and can also
-carry a tag, a due date, or a repeat schedule alongside it.
+existing card, any time) to mark a task as one that needs ongoing updates
+before it's truly done. It's a flag, not a tag or a separate section -- a
+follow-up task still gets prioritized and dragged into a quadrant like any
+other task, and can also carry a tag, a due date, or a repeat schedule
+alongside it.
 
-The behavior change is at completion time: checking off a follow-up task
-doesn't complete it immediately. Instead, an inline prompt opens asking what
-happened, with the same mic button pattern used for task titles elsewhere
-(voice fills the field for you to review -- it doesn't auto-submit). The
-comment is optional -- "Complete" works with it empty -- but the prompt is
-there because a resolution note is usually worth the extra few seconds.
-Once submitted, the task completes as normal and the comment shows as a
-quoted note under the title, both in its quadrant (for recurring follow-ups,
-which never leave the matrix) and in the Completed section (for one-off
-follow-ups).
+**Logging an update never completes the task.** A follow-up card gets a
+small message-bubble icon, separate from the checkbox -- click it any time
+while the task is still active to open an inline form (same mic-button
+pattern as elsewhere: voice fills the field, you still review before
+submitting) and log a dated note. Nothing else changes -- the task stays
+exactly where it is, checkbox still unchecked. Log as many of these as you
+need over the task's life.
 
-Un-checking a task never asks for a comment -- only the transition *into*
-completed does.
+**The checkbox means exactly what it means everywhere else in the app: check
+it, and the task completes.** There's no comment prompt in the way anymore
+-- you decide when the whole thing's actually done and check it off
+yourself, same gesture as any other task. All the dated updates you logged
+along the way show up together once it lands in Completed, in
+chronological order; while still active, the card shows just the latest
+one with a "N earlier updates" link to expand the rest.
+
+Old tasks from before this feature (which had a single `completionComment`
+rather than a dated list) still display correctly -- they're treated as one
+legacy entry.
 
 ## Timely tasks (due dates)
 
@@ -417,9 +453,16 @@ you check it off.
 
 ## Scheduled / recurring tasks
 
-Instead of a due date, a task can repeat: **Daily**, **Weekly** (pick a
-day), or **Monthly** (pick a day-of-month, 1-31 -- clamped to the last real
-day for short months, so "31" still fires in February, April, etc.).
+Instead of a due date, a task can repeat: **Daily**, **Weekly** (pick one or
+more days), **Biweekly** (pick one or more days, every other week), or
+**Monthly** (pick a day-of-month, 1-31 -- clamped to the last real day for
+short months, so "31" still fires in February, April, etc.).
+
+Weekly and biweekly both use a multi-select of weekday buttons rather than
+a single dropdown, so "every Monday and Thursday" is one task, not two.
+Biweekly needs a reference point to know which weeks count -- it's set
+automatically to the task's creation date ("starting this week, every 2
+weeks") with no extra UI to configure.
 
 Recurring tasks behave differently from normal ones:
 
@@ -431,18 +474,109 @@ Recurring tasks behave differently from normal ones:
   cycle" is always computed live against today's date.
 - On their due day (if not already done today), they get the same "Due
   today" yellow treatment and forced-into-Do behavior as a timely task.
-- A small repeat icon and a "Repeats every Friday" / "Repeats daily" /
-  "Repeats monthly on day 5" label always shows on the card so it's clear
-  it's a recurring commitment, not a one-off.
+- A small repeat icon and a label like "Repeats weekly on Monday, Thursday"
+  / "Repeats every other Friday" / "Repeats daily" always shows on the card
+  so it's clear it's a recurring commitment, not a one-off.
+- Their repeat schedule (along with title, notes, tag, and due date) is
+  editable any time via the pencil icon -- see "Editing a task" above.
 
 A task can have a due date **or** a repeat schedule, never both -- the
-timing dropdown in the new-task form enforces this, and the API rejects a
-request that sets both.
+timing dropdown enforces this in both the new-task form and the edit form,
+and the API rejects a request that sets both.
 
-> Both fields are set at creation time only in this version -- there's no
-> UI yet to add/change a due date or repeat schedule on an existing task.
-> Delete and recreate it if you need to change it; say the word if you'd
-> like in-place editing added.
+Tasks created before biweekly/multi-day existed still work unchanged --
+their old single `dayOfWeek` number is treated as a one-item list
+automatically, without needing to resave anything.
+
+### Multiple times a day
+
+For a daily task, check "Set specific times" and add two or more clock
+times (e.g. 8:00 AM, 2:00 PM, 8:00 PM) instead of picking a frequency day.
+These behave differently from every other recurring task:
+
+- **They stay wherever they're filed -- by default, Inbox -- and never get
+  forced into Do.** They're deliberately exempt from the due-today/overdue
+  escalation that applies to everything else, since "is it due" doesn't
+  mean much for something checked several times a day.
+- **Each time gets its own checkbox**, not one checkbox for the whole task.
+  A small checklist row (e.g. "☐ 8:00 AM ☑ 2:00 PM ☐ 8:00 PM") replaces the
+  usual single checkbox, tracked in a new `completedSlots` field that
+  resets automatically at midnight -- same "derive from today's date, don't
+  force-migrate" approach as everything else here.
+- **The reminder sound (see below) fires at each specific time**, not on
+  the interval-based "still due" nag -- once per listed time per day, the
+  moment the clock reaches that minute, independent of whether the
+  reminder sound's general due-based repeat is even turned on.
+
+One minor quirk worth knowing: a daily task with **exactly one** specific
+time still behaves like an ordinary daily task underneath (single
+checkbox, normal due/overdue escalation) *in addition to* getting the
+precise-time alert -- multi-checkbox mode only kicks in at two or more
+times. In practice this means a single-specific-time task can occasionally
+play its reminder sound twice in quick succession, if the precise-time
+alert and the general due-based reminder both happen to fire around the
+same moment. Harmless, just slightly redundant -- add a second time if you
+want to sidestep it entirely.
+
+## Reminder sound
+
+The gear icon's Settings panel has a "Reminder sound" control: pick **Bell**
+or **Urgent alert** (or leave it **Off**, the default), with a Test button
+to preview before committing. Both sounds are synthesized live with the
+Web Audio API -- no audio files bundled, nothing to license.
+
+While the setting is on, the app checks every minute (piggybacking on the
+same tick that keeps due-today/overdue status fresh) whether any task --
+one-off or recurring -- currently shows **Due today** or **Overdue**. If
+so, it plays the chosen sound, then waits `reminderIntervalMinutes` (30 by
+default) before it can fire again -- a real repeating reminder rather than
+a single ping, since it'll keep nudging you until you either complete the
+task or its due window passes.
+
+Separately, any daily task with specific times set (see "Multiple times a
+day" above) fires its own alert at each listed time, the moment the clock
+reaches that minute -- a different mechanism from the interval-based nag,
+since these need to fire at exact moments rather than repeat while
+something's generically overdue. Both mechanisms use whatever sound is
+currently selected; "which sound" is one Settings choice, not per-task.
+
+A few things worth knowing:
+
+- **Unlike most settings here, this one deliberately got a UI control**
+  instead of being config.json-only, since it's something you'd want to
+  toggle or preview interactively, not something you set once and forget
+  (compare to the archive threshold above).
+- Changing it never asks for a restart -- it's read fresh on every
+  `/api/config` fetch, unlike the storage-location settings.
+- **Browsers block audio until the page has seen a user gesture** (a click,
+  a keypress) at least once. If a reminder tries to fire before you've
+  interacted with the tab at all in that session, it silently skips --
+  every reminder after your first click plays normally.
+- This only fires while the tab is open. There's no OS-level notification
+  yet (via the browser's Notification API) that would alert you if the tab
+  isn't focused or visible -- say the word if you want that added.
+- `reminderIntervalMinutes` lives in `config.json` if you want a cadence
+  other than 30 minutes; there's no UI slider for it currently.
+
+## Archiving old completed tasks
+
+Completed one-off tasks older than 90 days move automatically out of
+`tasks.json` and into `archive_tasks.json`, right next to it -- so it
+follows wherever your data already lives (local folder, external sync
+folder, or git repo) with no separate configuration. This runs once at
+startup and then every 24 hours while the app stays running, so it doesn't
+depend on restarting often.
+
+- Recurring tasks are never touched -- they never set the permanent
+  `completed` flag, so they can't match the archive condition.
+- This is a **pure backup dump**, not something the app reads back -- once
+  archived, a task is gone from the UI and the API, and stays that way. If
+  you need to see it again, it's sitting in that JSON file for reference or
+  manual restoration; there's no in-app archive browser.
+- The 90-day threshold lives in `config.json`'s `archiveAfterDays` field --
+  edit that number directly, or set it to `0` to disable archiving
+  entirely. No Settings-panel toggle for this one; it's config-file-only by
+  design.
 
 ## Storage: file today, SharePoint List tomorrow
 
@@ -476,17 +610,17 @@ back to the single-process one-command flow.
 |--------|------|------|---------|
 | GET | `/api/tasks` | -- | list all tasks |
 | POST | `/api/tasks` | `{ title, notes?, tagId?, dueDate?, recurrence?, isFollowUp? }` | create (lands unplaced/inbox) |
-| PATCH | `/api/tasks/:id` | `{ urgent?, important?, completed?, title?, notes?, tagId?, dueDate?, recurrence?, lastCompletedDate?, isFollowUp?, completionComment? }` | move / complete / edit |
+| PATCH | `/api/tasks/:id` | `{ urgent?, important?, completed?, title?, notes?, tagId?, dueDate?, recurrence?, lastCompletedDate?, completedSlots?, isFollowUp?, completionComment? }` | move / complete / edit |
+| POST | `/api/tasks/:id/followup-comments` | `{ comment }` | append a dated follow-up entry (comment required, not skippable) |
 | DELETE | `/api/tasks/:id` | -- | delete |
 | GET | `/api/metadata` | -- | get `{ title, tags }` |
 | PATCH | `/api/metadata` | `{ title }` | rename the app |
 | POST | `/api/metadata/tags` | `{ name, color }` | add a new tag (`color` must be `#rrggbb`) |
-| GET | `/api/config` | -- | get sync settings, active paths, git status |
-| PATCH | `/api/config` | `{ useExternalSync?, externalFolder?, syncMethod? }` | change settings (`syncMethod`: `"folder"` \| `"git"`; folder/method changes need a restart) |
+| GET | `/api/config` | -- | get sync settings, reminder settings, active paths, git status |
+| PATCH | `/api/config` | `{ useExternalSync?, externalFolder?, syncMethod?, reminderSound?, reminderIntervalMinutes? }` | change settings (`syncMethod`: `"folder"` \| `"git"`, `reminderSound`: `"none"` \| `"bell"` \| `"alert"`; only storage-location changes need a restart) |
 
 ## Notes
 
 The file store is last-write-wins and single-user -- fine for a personal tool
 on one machine. Concurrency, auth, and multi-user support would need to be
 added before turning this into something a team edits simultaneously.
-"# EisenhowerMatrix" 

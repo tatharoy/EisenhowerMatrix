@@ -9,7 +9,7 @@ const crypto = require("crypto");
 // to get that persisted there with no code changes.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_TITLE = "Tatha's Schedule";
+const DEFAULT_TITLE = "Eisenhower Matrix";
 
 // Fixed ids for the built-in tags so they're stable references even though
 // the human-readable name or color could be edited later. Tags added later

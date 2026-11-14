@@ -1,6 +1,6 @@
 import TaskCard from "./TaskCard.jsx";
 
-export default function Inbox({ tasks, dragOver, onDragOver, onDragLeave, onDrop, onDragStart, onToggle, onDelete, onToggleFollowUp, onEdit, now }) {
+export default function Inbox({ tasks, dragOver, onDragOver, onDragLeave, onDrop, onDragStart, onToggle, onToggleTimeSlot, onDelete, onToggleFollowUp, onAddFollowUpComment, onEdit, tags, onAddTag, now }) {
   return (
     <section
       className={`inbox ${dragOver ? "drag-over" : ""}`}
@@ -24,11 +24,17 @@ export default function Inbox({ tasks, dragOver, onDragOver, onDragLeave, onDrop
             <TaskCard
               task={task}
               now={now}
+              tags={tags}
+              onAddTag={onAddTag}
               onDragStart={() => onDragStart(task.id)}
-              onToggle={(comment) => onToggle(task, comment)}
+              onToggle={() => onToggle(task)}
+              onToggleTimeSlot={(time) => onToggleTimeSlot(task, time)}
               onDelete={() => onDelete(task.id)}
               onToggleFollowUp={() => onToggleFollowUp(task)}
-              onEdit={(title, notes) => onEdit(task, title, notes)}
+              onAddFollowUpComment={(comment) => onAddFollowUpComment(task, comment)}
+              onEdit={(title, notes, tagId, dueDate, recurrence) =>
+                onEdit(task, title, notes, tagId, dueDate, recurrence)
+              }
             />
           </div>
         ))}

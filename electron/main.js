@@ -1,5 +1,30 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, session } = require("electron");
 const path = require("path");
+const fs = require("fs");
+
+// Renaming the app (productName) changes where Electron's userData folder
+// points -- %APPDATA%\Eisenhower Matrix\ instead of the old %APPDATA%\
+// Tatha's Schedule\. Nothing is ever deleted by that rename, but without
+// this, anyone with existing data would open the renamed app and see it
+// looking empty, since it'd be looking in a folder it never wrote to.
+// One-time, one-directional: copies over only if the new location doesn't
+// have data yet and the old one does.
+function migrateOldUserData() {
+  const newDir = app.getPath("userData");
+  const oldDir = path.join(app.getPath("appData"), "Tatha's Schedule");
+  if (oldDir === newDir) return;
+  const hasData = (dir) =>
+    fs.existsSync(path.join(dir, "config.json")) || fs.existsSync(path.join(dir, "data"));
+  if (hasData(newDir) || !hasData(oldDir)) return;
+  try {
+    fs.mkdirSync(newDir, { recursive: true });
+    fs.cpSync(oldDir, newDir, { recursive: true });
+    console.log(`Migrated existing data from "${oldDir}" to "${newDir}" after the app rename.`);
+  } catch (err) {
+    console.log(`Could not migrate old data folder (${oldDir}): ${err.message}`);
+  }
+}
+migrateOldUserData();
 
 // Route data to Electron's OS-standard, writable per-user folder (NOT the
 // installed app directory, which is expected to be read-only once packaged
@@ -19,15 +44,13 @@ const SERVER_URL = `http://localhost:${PORT}`;
 
 // Only one copy of this app (and one Express server on PORT) at a time.
 // Without this, clicking a second desktop shortcut while the app is
-// already running (hidden in the tray) would try to bind the same port
-// twice and fail.
+// already running would try to bind the same port twice and fail.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   let mainWindow = null;
   let tray = null;
-  let isQuitting = false;
 
   function backendEntryPath() {
     // Packaged app: backend/ was copied to resources/backend via
@@ -73,52 +96,64 @@ if (!gotLock) {
 
     mainWindow.once("ready-to-show", () => mainWindow.show());
 
-    // Minimize to tray instead of quitting when the window is closed --
-    // the server (same process) keeps running in the background either
-    // way; this only controls whether the window itself is visible.
-    mainWindow.on("close", (event) => {
-      if (!isQuitting) {
-        event.preventDefault();
-        mainWindow.hide();
-      }
+    // The X button now closes the window normally, same as any other
+    // Windows app -- previously this hid the window instead and kept the
+    // process alive indefinitely, which is the likely cause of the
+    // duplicate-process confusion: closing never actually ended anything,
+    // so state could accumulate across repeated open/close cycles. The
+    // native minimize button (unaffected by this handler) still gets it
+    // out of the way without closing anything, if that's what you want
+    // instead. window-all-closed below quits the whole app once this
+    // closes, so there's no lingering background process to speak of.
+    mainWindow.on("closed", () => {
+      mainWindow = null;
     });
+  }
+
+  function showOrCreateWindow() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
   }
 
   function createTray() {
     const icon = nativeImage.createFromPath(path.join(__dirname, "assets", "tray-icon.png"));
     tray = new Tray(icon);
-    tray.setToolTip("Tatha's Schedule");
+    tray.setToolTip("Eisenhower Matrix");
     tray.setContextMenu(
       Menu.buildFromTemplate([
         {
-          label: "Open Tatha's Schedule",
-          click: () => {
-            mainWindow?.show();
-            mainWindow?.focus();
-          },
+          label: "Open Eisenhower Matrix",
+          click: showOrCreateWindow,
         },
         { type: "separator" },
         {
           label: "Quit",
-          click: () => {
-            isQuitting = true;
-            app.quit();
-          },
+          click: () => app.quit(),
         },
       ])
     );
-    tray.on("click", () => {
-      if (!mainWindow) return;
-      mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
-    });
+    tray.on("click", showOrCreateWindow);
   }
 
-  app.on("second-instance", () => {
-    mainWindow?.show();
-    mainWindow?.focus();
-  });
+  app.on("second-instance", showOrCreateWindow);
 
   app.whenReady().then(() => {
+    // Electron blocks microphone/camera access by default unless a session
+    // explicitly grants it -- without this, the mic button's voice input
+    // silently fails to even prompt, regardless of anything in the page's
+    // own JS. This only covers the *permission* layer; whether the actual
+    // speech-to-text recognition works at all inside Electron's bundled
+    // Chromium (which lacks the signed API keys real Chrome/Edge builds
+    // have for that backend) is a separate, harder constraint -- see the
+    // README's "Voice input" section for the honest caveat on that.
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+      callback(permission === "media");
+    });
+
     startServer();
     createWindow();
     createTray();
@@ -128,19 +163,15 @@ if (!gotLock) {
     // (macOS) used by the standalone, non-Electron version.
     app.setLoginItemSettings({ openAtLogin: true });
 
-    app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
-      else mainWindow?.show();
-    });
+    app.on("activate", showOrCreateWindow);
   });
 
-  app.on("before-quit", () => {
-    isQuitting = true;
-  });
-
-  // The tray keeps the app alive on every platform -- closing the window
-  // never quits it, only the tray's Quit item (or Cmd+Q on macOS) does.
+  // Closing the window now quits the whole app (see the "closed" handler
+  // in createWindow) -- this just makes that explicit and consistent
+  // across platforms, rather than following macOS's usual "stay running
+  // with no windows open" convention, to keep the mental model simple:
+  // window closed means the app is done, full stop.
   app.on("window-all-closed", () => {
-    // Intentionally does nothing.
+    app.quit();
   });
 }

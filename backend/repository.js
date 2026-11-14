@@ -57,8 +57,12 @@ class FileRepository {
       dueDate: dueDate || null, // "YYYY-MM-DD", one-off deadline (mutually exclusive with recurrence)
       recurrence: recurrence || null, // { frequency, dayOfWeek?, dayOfMonth? } (mutually exclusive with dueDate)
       lastCompletedDate: null, // "YYYY-MM-DD" -- last cycle a recurring task was checked off
-      isFollowUp: !!isFollowUp, // flags this task as needing a completion comment
-      completionComment: null, // set (optionally) when marking a follow-up task done
+      completedSlots: null, // { date: "YYYY-MM-DD", times: ["08:00", ...] } -- for
+      // multiple-times-a-day tasks only (recurrence.times.length > 1); tracks
+      // which of today's scheduled times are done, independent of lastCompletedDate
+      isFollowUp: !!isFollowUp, // flags this task as supporting follow-up updates
+      followUpComments: [], // [{ comment, at }], appended via appendFollowUpComment()
+      completionComment: null, // legacy single-comment field, kept readable for old tasks
       urgent: null, // null = unplaced (inbox)
       important: null, // null = unplaced (inbox)
       completed: false,
@@ -81,7 +85,9 @@ class FileRepository {
     if (patch.dueDate !== undefined) task.dueDate = patch.dueDate;
     if (patch.recurrence !== undefined) task.recurrence = patch.recurrence;
     if (patch.lastCompletedDate !== undefined) task.lastCompletedDate = patch.lastCompletedDate;
+    if (patch.completedSlots !== undefined) task.completedSlots = patch.completedSlots;
     if (patch.isFollowUp !== undefined) task.isFollowUp = !!patch.isFollowUp;
+    if (patch.followUpComments !== undefined) task.followUpComments = patch.followUpComments;
     if (patch.completionComment !== undefined) task.completionComment = patch.completionComment;
     if (patch.urgent !== undefined) task.urgent = patch.urgent;
     if (patch.important !== undefined) task.important = patch.important;
@@ -90,6 +96,19 @@ class FileRepository {
       task.completedAt = patch.completed ? new Date().toISOString() : null;
     }
 
+    this._write(db);
+    return task;
+  }
+
+  // Atomic append, rather than the frontend sending the whole array back --
+  // safer against overwriting concurrent changes, and matches the "log an
+  // update, don't replace the record" mental model of a follow-up.
+  appendFollowUpComment(id, comment) {
+    const db = this._read();
+    const task = db.tasks.find((t) => t.id === id);
+    if (!task) return null;
+    if (!task.followUpComments) task.followUpComments = [];
+    task.followUpComments.push({ comment, at: new Date().toISOString() });
     this._write(db);
     return task;
   }

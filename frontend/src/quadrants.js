@@ -68,10 +68,75 @@ export function toDateStr(d) {
   return `${y}-${m}-${day}`;
 }
 
-export function isRecurrenceDueToday(recurrence, now) {
+// Same "YYYY-MM-DD" -> local-midnight Date parsing as formatDateStr, but
+// returning the Date itself rather than a formatted string (needed for the
+// biweekly week-parity math below).
+function parseDateStr(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+// Sunday-anchored start of the week containing `date`.
+function startOfWeek(date) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  d.setDate(d.getDate() - d.getDay());
+  return d;
+}
+
+function weeksBetween(a, b) {
+  const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+  return Math.round((startOfWeek(b) - startOfWeek(a)) / msPerWeek);
+}
+
+// Back-compat shim: older tasks stored a single `dayOfWeek` number. Newer
+// tasks (and the new "biweekly" frequency) store `daysOfWeek`, an array, to
+// support multiple selected weekdays. This normalizes on the fly at read
+// time rather than force-migrating stored files -- an old task keeps working
+// correctly even if it's never re-saved.
+export function normalizeRecurrence(recurrence) {
+  if (!recurrence) return null;
+  if (recurrence.daysOfWeek) return recurrence;
+  if (recurrence.dayOfWeek !== undefined && recurrence.dayOfWeek !== null) {
+    return { ...recurrence, daysOfWeek: [recurrence.dayOfWeek] };
+  }
+  return recurrence;
+}
+
+// A "multiple times a day" task: daily recurrence with 2+ specific clock
+// times. These are tracked and displayed completely differently from every
+// other task type -- see isSlotDoneToday / effectiveQuadrantKey below.
+export function isMultiTimeTask(task) {
+  const r = task.recurrence;
+  return !!(r && r.frequency === "daily" && r.times && r.times.length > 1);
+}
+
+export function isSlotDoneToday(task, time, now) {
+  const slots = task.completedSlots;
+  if (!slots || slots.date !== toDateStr(now)) return false;
+  return slots.times.includes(time);
+}
+
+// "08:00" -> "8:00 AM", using the browser's own locale formatting so it
+// matches whatever time format the person's system already uses.
+export function formatTimeStr(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const d = new Date(2000, 0, 1, h, m);
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+export function isRecurrenceDueToday(recurrenceRaw, now) {
+  const recurrence = normalizeRecurrence(recurrenceRaw);
   if (!recurrence) return false;
   if (recurrence.frequency === "daily") return true;
-  if (recurrence.frequency === "weekly") return now.getDay() === recurrence.dayOfWeek;
+  if (recurrence.frequency === "weekly") {
+    return (recurrence.daysOfWeek || []).includes(now.getDay());
+  }
+  if (recurrence.frequency === "biweekly") {
+    if (!(recurrence.daysOfWeek || []).includes(now.getDay())) return false;
+    if (!recurrence.anchorDate) return true; // no anchor stored -- fail open rather than never fire
+    const weeks = weeksBetween(parseDateStr(recurrence.anchorDate), now);
+    return ((weeks % 2) + 2) % 2 === 0; // safe modulo, in case weeks is ever negative
+  }
   if (recurrence.frequency === "monthly") {
     // Clamp to the last real day of the month, so "day 31" still fires in
     // months that don't have one (e.g. February).
@@ -92,6 +157,11 @@ export function isDoneForNow(task, now) {
 
 // 'dueToday' | 'overdue' | null
 export function dueStatus(task, now) {
+  // Multiple-times-a-day tasks have their own per-time checklist UI and
+  // alerting -- they're deliberately exempt from the due/overdue badge and
+  // the forced-into-Do escalation below, so they stay wherever placed
+  // (Inbox, by default, since nothing ever drags them out).
+  if (isMultiTimeTask(task)) return null;
   if (isDoneForNow(task, now)) return null;
   const ts = toDateStr(now);
   if (task.recurrence) {
@@ -113,14 +183,39 @@ export function effectiveQuadrantKey(task, now) {
   return quadrantKey(task);
 }
 
-export function recurrenceLabel(recurrence) {
+export function recurrenceLabel(recurrenceRaw) {
+  const recurrence = normalizeRecurrence(recurrenceRaw);
   if (!recurrence) return "";
-  if (recurrence.frequency === "daily") return "Repeats daily";
-  if (recurrence.frequency === "weekly") {
-    return `Repeats every ${WEEKDAY_NAMES[recurrence.dayOfWeek]}`;
+  if (recurrence.frequency === "daily") {
+    if (recurrence.times && recurrence.times.length > 1) {
+      const times = recurrence.times.slice().sort().map(formatTimeStr).join(", ");
+      return `Repeats daily at ${times}`;
+    }
+    return "Repeats daily";
+  }
+  if (recurrence.frequency === "weekly" || recurrence.frequency === "biweekly") {
+    const dayNums = (recurrence.daysOfWeek || []).slice().sort((a, b) => a - b);
+    const days = dayNums.map((d) => WEEKDAY_NAMES[d]).join(", ");
+    const isBiweekly = recurrence.frequency === "biweekly";
+    if (dayNums.length === 1) {
+      return isBiweekly ? `Repeats every other ${days}` : `Repeats every ${days}`;
+    }
+    return isBiweekly ? `Repeats every other week on ${days}` : `Repeats weekly on ${days}`;
   }
   if (recurrence.frequency === "monthly") {
     return `Repeats monthly on day ${recurrence.dayOfMonth}`;
   }
   return "";
+}
+
+// Back-compat shim, same idea as normalizeRecurrence: older tasks stored a
+// single `completionComment` string. Newer tasks log a dated history in
+// `followUpComments` instead. This lets display code just call one function
+// regardless of which shape a given task happens to have.
+export function getFollowUpComments(task) {
+  if (task.followUpComments && task.followUpComments.length) return task.followUpComments;
+  if (task.completionComment) {
+    return [{ comment: task.completionComment, at: task.completedAt || task.createdAt }];
+  }
+  return [];
 }

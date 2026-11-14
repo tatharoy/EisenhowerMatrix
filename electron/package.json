@@ -1,8 +1,8 @@
 {
-  "name": "tathas-schedule-desktop",
-  "version": "1.0.0",
+  "name": "eisenhower-matrix-desktop",
+  "version": "1.2.0",
   "private": true,
-  "description": "Desktop wrapper for Tatha's Schedule (Eisenhower matrix scheduler)",
+  "description": "Desktop wrapper for Eisenhower Matrix (a personal task scheduler)",
   "author": "Tatha",
   "main": "main.js",
   "scripts": {
@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.tathas.schedule",
-    "productName": "Tatha's Schedule",
+    "productName": "Eisenhower Matrix",
     "asar": true,
     "files": ["main.js", "assets/**/*"],
     "extraResources": [

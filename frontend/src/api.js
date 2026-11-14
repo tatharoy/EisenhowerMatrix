@@ -37,6 +37,13 @@ export const api = {
 
   remove: (id) => fetch(`${TASKS}/${id}`, { method: "DELETE" }).then(toJson),
 
+  addFollowUpComment: (id, comment) =>
+    fetch(`${TASKS}/${id}/followup-comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ comment }),
+    }).then(toJson),
+
   getMetadata: () => fetch(METADATA).then(toJson),
 
   updateTitle: (title) =>
